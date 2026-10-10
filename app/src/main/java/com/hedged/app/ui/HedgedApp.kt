@@ -374,22 +374,41 @@ private fun MonthSwitcher(
     onNext: () -> Unit,
     onToday: (() -> Unit)? = null,
 ) {
-    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-            TextButton(onClick = onPrevious) { Text("‹") }
-            Text(
-                month.format(DateTimeFormatter.ofPattern("MMMM yyyy")),
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.width(150.dp),
-                textAlign = TextAlign.Center,
-            )
-            TextButton(onClick = onNext) { Text("›") }
-        }
-        if (onToday != null && month != YearMonth.now()) {
-            FilledTonalButton(
-                onClick = onToday,
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-            ) { Text("This month") }
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Card(
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                    TextButton(
+                        onClick = onPrevious,
+                        modifier = Modifier.size(56.dp),
+                        contentPadding = PaddingValues(0.dp),
+                    ) { Text("‹", style = MaterialTheme.typography.headlineMedium) }
+                    Text(
+                        month.format(DateTimeFormatter.ofPattern("MMMM yyyy")),
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.width(150.dp),
+                        textAlign = TextAlign.Center,
+                    )
+                    TextButton(
+                        onClick = onNext,
+                        modifier = Modifier.size(56.dp),
+                        contentPadding = PaddingValues(0.dp),
+                    ) { Text("›", style = MaterialTheme.typography.headlineMedium) }
+                }
+                if (onToday != null && month != YearMonth.now()) {
+                    FilledTonalButton(
+                        onClick = onToday,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    ) { Text("This month") }
+                }
+            }
         }
     }
 }
