@@ -44,6 +44,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
@@ -62,6 +64,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -89,8 +92,10 @@ import com.hedged.app.data.HedgedDatabase
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.text.NumberFormat
+import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
@@ -107,12 +112,13 @@ private data class CategoryBudgetRow(
     val fundedCents: Long,
     val spentCents: Long,
 ) {
-    val remainingCents: Long get() = fundedCents - spentCents
-    val progress: Float get() = if (fundedCents <= 0) 0f else (spentCents.toFloat() / fundedCents).coerceIn(0f, 1f)
+    val spendingLimitCents: Long get() = budget?.desiredCapCents?.takeIf { it > 0 } ?: fundedCents
+    val remainingCents: Long get() = spendingLimitCents - spentCents
+    val progress: Float get() = if (spendingLimitCents <= 0) 0f else (spentCents.toFloat() / spendingLimitCents).coerceIn(0f, 1f)
     val status: String get() = when {
-        fundedCents <= 0L -> "Not funded"
-        spentCents > fundedCents -> "Over budget"
-        spentCents >= fundedCents * 0.8 -> "Near limit"
+        spendingLimitCents <= 0L -> "Not funded"
+        spentCents > spendingLimitCents -> "Over budget"
+        spentCents >= spendingLimitCents * 0.8 -> "Near limit"
         else -> "On track"
     }
 }
@@ -149,6 +155,7 @@ fun HedgedApp(viewModel: MainViewModel) {
         val message by viewModel.message.collectAsStateWithLifecycle()
         var screen by rememberSaveable { mutableStateOf(AppScreen.HOME) }
         var showAddTransaction by rememberSaveable { mutableStateOf(false) }
+        var editingTransaction by remember { mutableStateOf<HedgedDatabase.TransactionEntity?>(null) }
         var showCashFlow by rememberSaveable { mutableStateOf(false) }
         var editingCategory by remember { mutableStateOf<HedgedDatabase.CategoryEntity?>(null) }
         var addingCategory by rememberSaveable { mutableStateOf(false) }
@@ -232,6 +239,7 @@ fun HedgedApp(viewModel: MainViewModel) {
                             data = data,
                             onPreviousMonth = viewModel::previousMonth,
                             onNextMonth = viewModel::nextMonth,
+                            onEdit = { editingTransaction = it },
                             onDelete = viewModel::deleteTransaction,
                         )
                         AppScreen.SETTINGS -> SettingsScreen(
@@ -246,20 +254,23 @@ fun HedgedApp(viewModel: MainViewModel) {
             }
         }
 
-        if (showAddTransaction) {
+        if (showAddTransaction || editingTransaction != null) {
+            val transaction = editingTransaction
             TransactionSheet(
-                categories = data.categories.filter { it.isActive },
-                onDismiss = { showAddTransaction = false },
-                onSave = { category, amount, description, notes ->
-                    viewModel.addTransaction(
-                        category.id,
-                        category.kind,
-                        amount,
-                        LocalDate.now(),
-                        description,
-                        notes,
-                    )
+                existing = transaction,
+                categories = data.categories.filter { it.isActive || it.id == transaction?.categoryId },
+                onDismiss = {
                     showAddTransaction = false
+                    editingTransaction = null
+                },
+                onSave = { id, category, amount, date, description, notes ->
+                    if (id == null) {
+                        viewModel.addTransaction(category.id, category.kind, amount, date, description, notes)
+                    } else {
+                        viewModel.updateTransaction(id, category.id, category.kind, amount, date, description, notes)
+                    }
+                    showAddTransaction = false
+                    editingTransaction = null
                 },
             )
         }
@@ -312,6 +323,7 @@ fun HedgedApp(viewModel: MainViewModel) {
         fundingGoal?.let { goal ->
             GoalEntrySheet(
                 goal = goal,
+                balanceCents = snapshot.goalRows.firstOrNull { it.goal.id == goal.id }?.balanceCents ?: 0,
                 onDismiss = { fundingGoal = null },
                 onSave = { amount, note ->
                     viewModel.addGoalEntry(goal.id, amount, note)
@@ -638,7 +650,14 @@ private fun BudgetRowCard(row: CategoryBudgetRow, onClick: (() -> Unit)? = null)
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("${money(row.spentCents)} spent", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("${money(row.fundedCents)} funded", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    if (row.budget?.desiredCapCents != null) {
+                        "${money(row.spendingLimitCents)} limit"
+                    } else {
+                        "${money(row.fundedCents)} funded"
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
@@ -785,6 +804,7 @@ private fun ActivityScreen(
     data: BudgetData,
     onPreviousMonth: () -> Unit,
     onNextMonth: () -> Unit,
+    onEdit: (HedgedDatabase.TransactionEntity) -> Unit,
     onDelete: (Long) -> Unit,
 ) {
     var pendingDelete by remember { mutableStateOf<HedgedDatabase.TransactionEntity?>(null) }
@@ -811,7 +831,12 @@ private fun ActivityScreen(
                 }
                 items(transactions, key = { it.id }) { transaction ->
                     val category = categories[transaction.categoryId]
-                    TransactionCard(transaction, category, onDelete = { pendingDelete = transaction })
+                    TransactionCard(
+                        transaction,
+                        category,
+                        onEdit = { onEdit(transaction) },
+                        onDelete = { pendingDelete = transaction },
+                    )
                 }
             }
         }
@@ -835,9 +860,14 @@ private fun ActivityScreen(
 private fun TransactionCard(
     transaction: HedgedDatabase.TransactionEntity,
     category: HedgedDatabase.CategoryEntity?,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onEdit),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(42.dp).clip(CircleShape).background(categoryColor(category?.colorKey ?: "sage").copy(alpha = .22f)),
@@ -934,19 +964,25 @@ private fun SettingsScreen(
 
 @Composable
 private fun TransactionSheet(
+    existing: HedgedDatabase.TransactionEntity?,
     categories: List<HedgedDatabase.CategoryEntity>,
     onDismiss: () -> Unit,
-    onSave: (HedgedDatabase.CategoryEntity, Long, String?, String?) -> Unit,
+    onSave: (Long?, HedgedDatabase.CategoryEntity, Long, LocalDate, String?, String?) -> Unit,
 ) {
-    var type by rememberSaveable { mutableStateOf("EXPENSE") }
-    var amount by rememberSaveable { mutableStateOf("") }
-    var selectedId by rememberSaveable { mutableStateOf<Long?>(null) }
-    var showMore by rememberSaveable { mutableStateOf(false) }
-    var description by rememberSaveable { mutableStateOf("") }
-    var notes by rememberSaveable { mutableStateOf("") }
+    var type by rememberSaveable(existing?.id) { mutableStateOf(existing?.type ?: "EXPENSE") }
+    var amount by rememberSaveable(existing?.id) { mutableStateOf(existing?.amountCents?.let(::editableMoney).orEmpty()) }
+    var selectedId by rememberSaveable(existing?.id) { mutableStateOf(existing?.categoryId) }
+    var dateEpochDay by rememberSaveable(existing?.id) { mutableStateOf(existing?.dateEpochDay ?: LocalDate.now().toEpochDay()) }
+    var showDatePicker by rememberSaveable { mutableStateOf(false) }
+    var showMore by rememberSaveable(existing?.id) {
+        mutableStateOf(!existing?.description.isNullOrBlank() || !existing?.notes.isNullOrBlank())
+    }
+    var description by rememberSaveable(existing?.id) { mutableStateOf(existing?.description.orEmpty()) }
+    var notes by rememberSaveable(existing?.id) { mutableStateOf(existing?.notes.orEmpty()) }
     val filtered = categories.filter { it.kind == type }
     val selected = filtered.firstOrNull { it.id == selectedId }
     val amountCents = amount.toCentsOrNull()
+    val transactionDate = LocalDate.ofEpochDay(dateEpochDay)
 
     LaunchedEffect(type) {
         if (filtered.none { it.id == selectedId }) selectedId = filtered.firstOrNull()?.id
@@ -954,19 +990,25 @@ private fun TransactionSheet(
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
-            modifier = Modifier.fillMaxWidth().imePadding().padding(horizontal = 20.dp).padding(bottom = 24.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .imePadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("Add transaction", style = MaterialTheme.typography.headlineMedium)
+            Text(if (existing == null) "Add transaction" else "Edit transaction", style = MaterialTheme.typography.headlineMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(selected = type == "EXPENSE", onClick = { type = "EXPENSE" }, label = { Text("Expense") })
                 FilterChip(selected = type == "INCOME", onClick = { type = "INCOME" }, label = { Text("Income") })
-                Spacer(Modifier.weight(1f))
-                Text("Today", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterVertically))
+            }
+            OutlinedButton(onClick = { showDatePicker = true }, modifier = Modifier.fillMaxWidth()) {
+                Text(transactionDate.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)))
             }
             OutlinedTextField(
                 value = amount,
-                onValueChange = { value -> amount = value.filter { it.isDigit() || it == '.' }.take(12) },
+                onValueChange = { amount = it.moneyInput() },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Amount") },
                 prefix = { Text("$") },
@@ -1014,11 +1056,33 @@ private fun TransactionSheet(
                 }
             }
             Button(
-                onClick = { selected?.let { onSave(it, amountCents ?: 0, description, notes) } },
+                onClick = { selected?.let { onSave(existing?.id, it, amountCents ?: 0, transactionDate, description, notes) } },
                 enabled = selected != null && amountCents != null && amountCents > 0,
                 modifier = Modifier.fillMaxWidth().height(54.dp),
                 shape = RoundedCornerShape(18.dp),
-            ) { Text("Save ${type.lowercase()}") }
+            ) { Text(if (existing == null) "Save ${type.lowercase()}" else "Update transaction") }
+        }
+    }
+
+    if (showDatePicker) {
+        val datePickerState = rememberDatePickerState(
+            initialSelectedDateMillis = transactionDate.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+        )
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        datePickerState.selectedDateMillis?.let { millis ->
+                            dateEpochDay = Instant.ofEpochMilli(millis).atZone(ZoneOffset.UTC).toLocalDate().toEpochDay()
+                        }
+                        showDatePicker = false
+                    },
+                ) { Text("Done") }
+            },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("Cancel") } },
+        ) {
+            DatePicker(state = datePickerState)
         }
     }
 }
@@ -1044,9 +1108,16 @@ private fun CategorySheet(
                 shape = RoundedCornerShape(16.dp),
             )
             Text("Type", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = kind == "EXPENSE", onClick = { kind = "EXPENSE" }, label = { Text("Spending") })
-                FilterChip(selected = kind == "INCOME", onClick = { kind = "INCOME" }, label = { Text("Income") })
+            if (existing == null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = kind == "EXPENSE", onClick = { kind = "EXPENSE" }, label = { Text("Spending") })
+                    FilterChip(selected = kind == "INCOME", onClick = { kind = "INCOME" }, label = { Text("Income") })
+                }
+            } else {
+                Text(
+                    if (kind == "EXPENSE") "Spending" else "Income",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             ColorPicker(color, onSelected = { color = it })
             Button(
@@ -1115,7 +1186,7 @@ private fun BudgetSheet(
             OutlinedTextField(
                 value = cap,
                 onValueChange = { cap = it.moneyInput() },
-                label = { Text("Desired cap (optional)") },
+                label = { Text("Spending limit (optional)") },
                 prefix = { Text("$") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 singleLine = true,
@@ -1125,7 +1196,7 @@ private fun BudgetSheet(
             Button(
                 onClick = {
                     onSave(
-                        cap.toCentsOrNull(),
+                        cap.toCentsOrNull()?.takeIf { it > 0 },
                         if (percentageRule) 0 else funded.toCentsOrNull() ?: 0,
                         if (percentageRule) "PERCENT" else "FIXED",
                         if (percentageRule) rate else null,
@@ -1183,6 +1254,7 @@ private fun GoalSheet(
 @Composable
 private fun GoalEntrySheet(
     goal: HedgedDatabase.GoalEntity,
+    balanceCents: Long,
     onDismiss: () -> Unit,
     onSave: (Long, String?) -> Unit,
 ) {
@@ -1190,6 +1262,7 @@ private fun GoalEntrySheet(
     var amount by rememberSaveable { mutableStateOf("") }
     var note by rememberSaveable { mutableStateOf("") }
     val cents = amount.toCentsOrNull()
+    val withdrawalTooLarge = !isContribution && cents != null && cents > balanceCents
     ModalBottomSheet(onDismissRequest = onDismiss) {
         SheetColumn {
             Text(goal.name, style = MaterialTheme.typography.headlineMedium)
@@ -1207,6 +1280,12 @@ private fun GoalEntrySheet(
                 singleLine = true,
                 shape = RoundedCornerShape(16.dp),
             )
+            if (!isContribution) {
+                Text(
+                    if (withdrawalTooLarge) "Withdrawal exceeds ${money(balanceCents)}" else "Available: ${money(balanceCents)}",
+                    color = if (withdrawalTooLarge) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             OutlinedTextField(
                 value = note,
                 onValueChange = { note = it },
@@ -1217,7 +1296,7 @@ private fun GoalEntrySheet(
             )
             Button(
                 onClick = { onSave(if (isContribution) cents ?: 0 else -(cents ?: 0), note) },
-                enabled = cents != null && cents > 0,
+                enabled = cents != null && cents > 0 && !withdrawalTooLarge,
                 modifier = Modifier.fillMaxWidth().height(52.dp),
                 shape = RoundedCornerShape(18.dp),
             ) { Text(if (isContribution) "Add contribution" else "Record withdrawal") }
@@ -1228,7 +1307,12 @@ private fun GoalEntrySheet(
 @Composable
 private fun SheetColumn(content: @Composable ColumnScope.() -> Unit) {
     Column(
-        modifier = Modifier.fillMaxWidth().imePadding().padding(horizontal = 20.dp).padding(bottom = 28.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .imePadding()
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
         content = content,
     )

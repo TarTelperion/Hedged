@@ -49,6 +49,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         repository.deleteTransaction(id)
     }
 
+    fun updateTransaction(
+        id: Long,
+        categoryId: Long,
+        type: String,
+        amountCents: Long,
+        date: LocalDate,
+        description: String?,
+        notes: String?,
+    ) = launchAction("Transaction updated") {
+        repository.updateTransaction(id, categoryId, type, amountCents, date, description, notes)
+    }
+
     fun saveCategory(existingId: Long?, name: String, kind: String, colorKey: String) =
         launchAction("Category saved") { repository.saveCategory(existingId, name, kind, colorKey) }
 

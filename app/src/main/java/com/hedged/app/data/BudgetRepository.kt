@@ -79,6 +79,27 @@ class BudgetRepository(private val db: HedgedDatabase) {
         reloadBlocking()
     }
 
+    suspend fun updateTransaction(
+        id: Long,
+        categoryId: Long,
+        type: String,
+        amountCents: Long,
+        date: LocalDate,
+        description: String?,
+        notes: String?,
+    ) = withContext(Dispatchers.IO) {
+        val transaction = db.transactionDao().getById(id) ?: error("Transaction not found")
+        transaction.categoryId = categoryId
+        transaction.type = type
+        transaction.amountCents = amountCents
+        transaction.dateEpochDay = date.toEpochDay()
+        transaction.description = description?.trim()?.takeIf { it.isNotEmpty() }
+        transaction.notes = notes?.trim()?.takeIf { it.isNotEmpty() }
+        transaction.updatedAt = System.currentTimeMillis()
+        db.transactionDao().update(transaction)
+        reloadBlocking()
+    }
+
     suspend fun deleteTransaction(id: Long) = withContext(Dispatchers.IO) {
         db.transactionDao().deleteById(id)
         reloadBlocking()
@@ -98,7 +119,6 @@ class BudgetRepository(private val db: HedgedDatabase) {
             db.categoryDao().insert(category(trimmed, kind, colorKey, order))
         } else {
             existing.name = trimmed
-            existing.kind = kind
             existing.colorKey = colorKey
             existing.isActive = true
             db.categoryDao().update(existing)
@@ -176,6 +196,11 @@ class BudgetRepository(private val db: HedgedDatabase) {
     suspend fun addGoalEntry(goalId: Long, amountCentsSigned: Long, notes: String?) =
         withContext(Dispatchers.IO) {
             if (amountCentsSigned == 0L) return@withContext
+            if (amountCentsSigned < 0) {
+                require(-amountCentsSigned <= db.goalEntryDao().balanceForGoal(goalId)) {
+                    "Withdrawal cannot exceed the goal balance"
+                }
+            }
             db.goalEntryDao().insert(
                 HedgedDatabase.GoalEntryEntity(
                     0,

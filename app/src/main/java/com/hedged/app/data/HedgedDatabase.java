@@ -235,6 +235,9 @@ public abstract class HedgedDatabase extends RoomDatabase {
         @Query("SELECT * FROM transactions ORDER BY date_epoch_day DESC, created_at DESC")
         List<TransactionEntity> getAll();
 
+        @Query("SELECT * FROM transactions WHERE id = :id LIMIT 1")
+        TransactionEntity getById(long id);
+
         @Insert
         long insert(TransactionEntity transaction);
 
@@ -294,6 +297,9 @@ public abstract class HedgedDatabase extends RoomDatabase {
     public interface GoalEntryDao {
         @Query("SELECT * FROM goal_entries ORDER BY date_epoch_day DESC, created_at DESC")
         List<GoalEntryEntity> getAll();
+
+        @Query("SELECT COALESCE(SUM(amount_cents_signed), 0) FROM goal_entries WHERE goal_id = :goalId")
+        long balanceForGoal(long goalId);
 
         @Insert
         long insert(GoalEntryEntity entry);
